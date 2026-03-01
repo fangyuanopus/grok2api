@@ -181,7 +181,7 @@ async function importTokenFromHashIfPresent() {
     }
 
     const pool = 'ssoBasic';
-    flatTokens.push({
+    const newTokenEntry = {
       token: token,
       pool: pool,
       status: 'active',
@@ -191,11 +191,19 @@ async function importTokenFromHashIfPresent() {
       fail_count: 0,
       use_count: 0,
       _selected: false
-    });
+    };
+    flatTokens.push(newTokenEntry);
 
-    await syncToServer();
-    tokenAdded = true;
-    shouldClearHash = true;
+    try {
+      await syncToServer();
+      tokenAdded = true;
+      shouldClearHash = true;
+    } catch (e) {
+      flatTokens = flatTokens.filter(t => t !== newTokenEntry);
+      updateStats(allTokens);
+      renderTable();
+      throw e;
+    }
   }
 
   if (tokenAdded) {
@@ -262,7 +270,11 @@ async function init() {
   setupEditPoolDefaults();
   setupConfirmDialog();
   await loadData();
-  await importTokenFromHashIfPresent();
+  try {
+    await importTokenFromHashIfPresent();
+  } catch (e) {
+    showToast('URL 导入失败: ' + e.message, 'error');
+  }
 }
 
 async function loadData() {
@@ -366,6 +378,18 @@ function updateStats(data) {
   });
 }
 
+function copyTokenByIndex(index, btn) {
+  const item = flatTokens[index];
+  if (!item) return;
+  copyToClipboard(item.token, btn);
+}
+
+function refreshStatusByIndex(index, btn) {
+  const item = flatTokens[index];
+  if (!item) return;
+  refreshStatus(item.token, btn);
+}
+
 function renderTable() {
   const tbody = byId('token-table-body');
   const loading = byId('loading');
@@ -411,10 +435,12 @@ function renderTable() {
     const tokenShort = item.token.length > 24
       ? item.token.substring(0, 8) + '...' + item.token.substring(item.token.length - 16)
       : item.token;
+    const tokenFullEscaped = escapeHtml(item.token);
+    const tokenShortEscaped = escapeHtml(tokenShort);
     tdToken.innerHTML = `
                 <div class="flex items-center gap-2">
-                    <span class="font-mono text-xs text-gray-500" title="${item.token}">${tokenShort}</span>
-                    <button class="text-gray-400 hover:text-black transition-colors" onclick="copyToClipboard('${item.token}', this)">
+                    <span class="font-mono text-xs text-gray-500" title="${tokenFullEscaped}">${tokenShortEscaped}</span>
+                    <button class="text-gray-400 hover:text-black transition-colors" onclick="copyTokenByIndex(${originalIndex}, this)">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                     </button>
                 </div>
@@ -453,7 +479,7 @@ function renderTable() {
     tdActions.className = 'text-center';
     tdActions.innerHTML = `
                 <div class="flex items-center justify-center gap-2">
-                     <button onclick="refreshStatus('${item.token}')" class="p-1 text-gray-400 hover:text-black rounded" title="刷新状态">
+                     <button onclick="refreshStatusByIndex(${originalIndex}, this)" class="p-1 text-gray-400 hover:text-black rounded" title="刷新状态">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
                      </button>
                      <button onclick="openEditModal(${originalIndex})" class="p-1 text-gray-400 hover:text-black rounded" title="编辑">
@@ -611,6 +637,11 @@ function closeEditModal() {
 async function saveEdit() {
   // Collect data
   let token;
+  const originalItem =
+    currentEditIndex >= 0 && flatTokens[currentEditIndex]
+      ? { ...flatTokens[currentEditIndex] }
+      : null;
+  let createdNew = false;
   const newPool = byId('edit-pool').value.trim();
   const newQuota = parseInt(byId('edit-quota').value) || 0;
   const newNote = byId('edit-note').value.trim().slice(0, 50);
@@ -644,20 +675,41 @@ async function saveEdit() {
       use_count: 0,
       _selected: false
     });
+    createdNew = true;
   }
 
-  await syncToServer();
-  closeEditModal();
-  // Reload to ensure consistent state/grouping
-  // Or simpler: just re-render but syncToServer does the hard work
-  loadData();
+  try {
+    await syncToServer();
+    closeEditModal();
+    // Reload to ensure consistent state/grouping
+    // Or simpler: just re-render but syncToServer does the hard work
+    await loadData();
+  } catch (e) {
+    // 回滚本地 UI，避免显示“已改动”但服务端保存失败
+    if (createdNew) {
+      flatTokens = flatTokens.filter(t => t.token !== token);
+    } else if (currentEditIndex >= 0 && originalItem) {
+      flatTokens[currentEditIndex] = originalItem;
+    }
+    updateStats(allTokens);
+    renderTable();
+  }
 }
 
 async function deleteToken(index) {
   const ok = await confirmAction('确定要删除此 Token 吗？', { okText: '删除' });
   if (!ok) return;
+  const snapshot = flatTokens.slice();
   flatTokens.splice(index, 1);
-  syncToServer().then(loadData);
+  try {
+    await syncToServer();
+    await loadData();
+  } catch (e) {
+    // 回滚本地状态，避免 UI 与服务端不一致
+    flatTokens = snapshot;
+    updateStats(allTokens);
+    renderTable();
+  }
 }
 
 function batchDelete() {
@@ -696,9 +748,17 @@ async function syncToServer() {
       },
       body: JSON.stringify(newTokens)
     });
-    if (!res.ok) showToast('保存失败', 'error');
+    if (!res.ok) {
+      let detail = `HTTP ${res.status}`;
+      try {
+        const data = await readJsonResponse(res);
+        detail = (data && (data.detail || data.message)) || detail;
+      } catch (e) {}
+      throw new Error(detail);
+    }
   } catch (e) {
     showToast('保存错误: ' + e.message, 'error');
+    throw e;
   }
 }
 
@@ -715,6 +775,7 @@ function closeImportModal() {
 }
 
 async function submitImport() {
+  const snapshot = flatTokens.slice();
   const pool = byId('import-pool').value.trim() || 'ssoBasic';
   const text = byId('import-text').value;
   const lines = text.split('\n');
@@ -750,11 +811,17 @@ async function submitImport() {
     return showToast('No valid token found in pasted content', 'error');
   }
 
-  await syncToServer();
-  closeImportModal();
-  loadData();
-  if (skipped > 0) {
-    showToast(`Import done: added ${added}, skipped ${skipped}`, 'warning');
+  try {
+    await syncToServer();
+    closeImportModal();
+    await loadData();
+    if (skipped > 0) {
+      showToast(`Import done: added ${added}, skipped ${skipped}`, 'warning');
+    }
+  } catch (e) {
+    flatTokens = snapshot;
+    updateStats(allTokens);
+    renderTable();
   }
 }
 
@@ -783,9 +850,12 @@ async function copyToClipboard(text, btn) {
   }
 }
 
-async function refreshStatus(token) {
+async function refreshStatus(token, btn = null) {
   try {
-    const btn = event.currentTarget; // Get button element if triggered by click
+    if (!btn && typeof event !== 'undefined' && event && event.currentTarget) {
+      btn = event.currentTarget;
+    }
+
     if (btn) {
       btn.innerHTML = `<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`;
     }
@@ -803,7 +873,7 @@ async function refreshStatus(token) {
 
     if (res.ok && data.status === 'success') {
       const isSuccess = data.results && data.results[token];
-      loadData();
+      await loadData();
 
       if (isSuccess) {
         showToast('刷新成功', 'success');
@@ -811,11 +881,16 @@ async function refreshStatus(token) {
         showToast('刷新失败', 'error');
       }
     } else {
-      showToast('刷新失败', 'error');
+      const detail = data && (data.detail || data.message);
+      showToast(detail ? `刷新失败: ${detail}` : '刷新失败', 'error');
     }
   } catch (e) {
     console.error(e);
-    showToast('请求错误', 'error');
+    showToast('请求错误: ' + e.message, 'error');
+  } finally {
+    if (btn) {
+      btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>`;
+    }
   }
 }
 
@@ -1013,6 +1088,7 @@ async function startBatchDelete() {
   updateBatchProgress();
   setActionButtonsState();
 
+  const snapshot = flatTokens.slice();
   try {
     const toRemove = new Set(batchQueue);
     flatTokens = flatTokens.filter(t => !toRemove.has(t.token));
@@ -1022,6 +1098,9 @@ async function startBatchDelete() {
     finishBatchProcess(false, { silent: true });
     showToast('删除完成', 'success');
   } catch (e) {
+    flatTokens = snapshot;
+    updateStats(allTokens);
+    renderTable();
     finishBatchProcess(true, { silent: true });
     showToast('删除失败', 'error');
   }
