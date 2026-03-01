@@ -15,8 +15,8 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# 安装 uv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+# 安装 uv（避免依赖 ghcr 镜像，提升本地构建成功率）
+RUN pip install --no-cache-dir uv
 
 COPY pyproject.toml uv.lock ./
 

@@ -63,10 +63,20 @@ class ImageService:
         match = self._url_pattern.search(url or "")
         return match.group(1) if match else None
 
+    @staticmethod
+    def _int_config(key: str, default: int) -> int:
+        """Safely read integer config values from potentially mixed-type storage."""
+        value = get_config(key, default)
+        try:
+            return int(value)
+        except Exception:
+            return default
+
     def _is_final_image(self, url: str, blob_size: int) -> bool:
+        final_min_bytes = self._int_config("image.image_ws_final_min_bytes", 100000)
         return (url or "").lower().endswith(
             (".jpg", ".jpeg")
-        ) and blob_size > get_config("image.image_ws_final_min_bytes")
+        ) and blob_size > final_min_bytes
 
     def _classify_image(self, url: str, blob: str) -> Optional[Dict[str, object]]:
         if not url or not blob:
@@ -75,13 +85,14 @@ class ImageService:
         image_id = self._extract_image_id(url) or uuid.uuid4().hex
         blob_size = len(blob)
         is_final = self._is_final_image(url, blob_size)
+        medium_min_bytes = self._int_config("image.image_ws_medium_min_bytes", 30000)
 
         stage = (
             "final"
             if is_final
             else (
                 "medium"
-                if blob_size > get_config("image.image_ws_medium_min_bytes")
+                if blob_size > medium_min_bytes
                 else "preview"
             )
         )
