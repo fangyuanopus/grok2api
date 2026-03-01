@@ -129,11 +129,10 @@ async function applyConfigFromHash(cfRaw, proxyRaw) {
 
   if (Object.keys(payload).length === 0) return false;
 
-  const res = await fetch('/api/v1/admin/config', {
+  const res = await fetchWithApiKey('/api/v1/admin/config', {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
-      ...buildAuthHeaders(apiKey)
+      'Content-Type': 'application/json'
     },
     body: JSON.stringify(payload)
   });
@@ -227,6 +226,27 @@ async function readJsonResponse(res) {
   }
 }
 
+async function fetchWithApiKey(url, options = {}, retryOnUnauthorized = true) {
+  const buildOptions = (key) => ({
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      ...buildAuthHeaders(key)
+    }
+  });
+
+  let res = await fetch(url, buildOptions(apiKey));
+  if (res.status === 401 && retryOnUnauthorized) {
+    const refreshedApiKey = await ensureApiKey();
+    if (refreshedApiKey === null) {
+      throw new Error('登录已失效，请重新登录');
+    }
+    apiKey = refreshedApiKey;
+    res = await fetch(url, buildOptions(apiKey));
+  }
+  return res;
+}
+
 function getSelectedTokens() {
   return flatTokens.filter(t => t._selected);
 }
@@ -279,9 +299,7 @@ async function init() {
 
 async function loadData() {
   try {
-    const res = await fetch('/api/v1/admin/tokens', {
-      headers: buildAuthHeaders(apiKey)
-    });
+    const res = await fetchWithApiKey('/api/v1/admin/tokens');
     if (res.ok) {
       const data = await res.json();
       allTokens = data;
@@ -740,11 +758,10 @@ async function syncToServer() {
   });
 
   try {
-    const res = await fetch('/api/v1/admin/tokens', {
+    const res = await fetchWithApiKey('/api/v1/admin/tokens', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        ...buildAuthHeaders(apiKey)
+        'Content-Type': 'application/json'
       },
       body: JSON.stringify(newTokens)
     });
@@ -860,11 +877,10 @@ async function refreshStatus(token, btn = null) {
       btn.innerHTML = `<svg class="animate-spin" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"></path></svg>`;
     }
 
-    const res = await fetch('/api/v1/admin/tokens/refresh', {
+    const res = await fetchWithApiKey('/api/v1/admin/tokens/refresh', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        ...buildAuthHeaders(apiKey)
+        'Content-Type': 'application/json'
       },
       body: JSON.stringify({ token: token })
     });
@@ -916,11 +932,10 @@ async function startBatchRefresh() {
   setActionButtonsState();
 
   try {
-    const res = await fetch('/api/v1/admin/tokens/refresh/async', {
+    const res = await fetchWithApiKey('/api/v1/admin/tokens/refresh/async', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        ...buildAuthHeaders(apiKey)
+        'Content-Type': 'application/json'
       },
       body: JSON.stringify({ tokens: batchQueue })
     });
@@ -1287,22 +1302,20 @@ async function batchEnableNSFW() {
   try {
     const tokens = selected.length > 0 ? selected.map(t => t.token) : null;
     const requestBody = JSON.stringify({ tokens });
-    const res = await fetch('/api/v1/admin/tokens/nsfw/enable/async', {
+    const res = await fetchWithApiKey('/api/v1/admin/tokens/nsfw/enable/async', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        ...buildAuthHeaders(apiKey)
+        'Content-Type': 'application/json'
       },
       body: requestBody
     });
 
     // 兼容旧版后端：不存在 async 端点时，自动回退到同步端点
     if (res.status === 404) {
-      const legacyRes = await fetch('/api/v1/admin/tokens/nsfw/enable', {
+      const legacyRes = await fetchWithApiKey('/api/v1/admin/tokens/nsfw/enable', {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
-          ...buildAuthHeaders(apiKey)
+          'Content-Type': 'application/json'
         },
         body: requestBody
       });
