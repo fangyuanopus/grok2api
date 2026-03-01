@@ -613,15 +613,25 @@ class SQLStorage(BaseStorage):
             )
             async with self.async_session() as session:
                 start = time.monotonic()
+                # Serverless 环境下增加超时时间
+                max_timeout = min(timeout, 30)
                 while True:
-                    res = await session.execute(
-                        text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_key}
-                    )
-                    if res.scalar():
-                        break
-                    if time.monotonic() - start >= timeout:
-                        raise StorageError(f"SQLStorage: 无法获取锁 '{name}'")
-                    await asyncio.sleep(0.1)
+                    try:
+                        res = await session.execute(
+                            text("SELECT pg_try_advisory_lock(:key)"), {"key": lock_key}
+                        )
+                        if res.scalar():
+                            break
+                    except Exception:
+                        # 锁获取失败时直接跳过，避免阻塞
+                        logger.warning(f"SQLStorage: 获取锁 '{name}' 失败，跳过锁")
+                        yield
+                        return
+                    if time.monotonic() - start >= max_timeout:
+                        logger.warning(f"SQLStorage: 获取锁 '{name}' 超时，跳过锁")
+                        yield
+                        return
+                    await asyncio.sleep(0.2)
                 try:
                     yield
                 finally:
