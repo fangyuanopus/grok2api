@@ -59,6 +59,156 @@ function downloadTextFile(content, filename) {
   document.body.removeChild(a);
 }
 
+function sanitizeTokenInput(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+
+  // Remove invisible chars from copy/paste.
+  let token = raw
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+    .replace(/\u00A0/g, ' ')
+    .trim();
+
+  token = token.replace(/^["'`]+|["'`]+$/g, '');
+  token = token.replace(/^Bearer\s+/i, '');
+
+  // If a whole cookie string is pasted, extract sso value.
+  const ssoMatch = token.match(/(?:^|;\s*)sso=([^;]+)/i);
+  if (ssoMatch && ssoMatch[1]) token = ssoMatch[1];
+
+  token = token.replace(/^sso=/i, '');
+  token = token.replace(/\s+/g, '');
+  token = token.replace(/[，,;；]+$/g, '');
+
+  return token;
+}
+
+function isLikelyToken(token) {
+  return !!token && /^[A-Za-z0-9._\-+=/]{20,}$/.test(token);
+}
+
+function readImportDataFromHash() {
+  const hash = (window.location.hash || '').replace(/^#/, '');
+  if (!hash) return { token: '', cf: '', proxy: '' };
+  const params = new URLSearchParams(hash);
+  return {
+    token: params.get('sso') || params.get('token') || params.get('import_token') || '',
+    cf: params.get('cf') || params.get('cf_clearance') || '',
+    proxy: params.get('proxy') || params.get('base_proxy_url') || ''
+  };
+}
+
+function clearImportHash() {
+  if (!window.location.hash) return;
+  history.replaceState(null, '', window.location.pathname + window.location.search);
+}
+
+function sanitizeConfigValue(raw) {
+  if (!raw || typeof raw !== 'string') return '';
+  return raw.replace(/[\u200B-\u200D\u2060\uFEFF]/g, '').trim().replace(/^["'`]+|["'`]+$/g, '');
+}
+
+function isLikelyProxyUrl(url) {
+  if (!url) return false;
+  return /^(https?|socks5h?|socks4a?):\/\/\S+$/i.test(url);
+}
+
+async function applyConfigFromHash(cfRaw, proxyRaw) {
+  const cf = sanitizeConfigValue(cfRaw);
+  const proxy = sanitizeConfigValue(proxyRaw);
+  if (!cf && !proxy) return false;
+
+  const payload = {};
+  if (cf) {
+    payload.grok = { ...(payload.grok || {}), cf_clearance: cf };
+    payload.security = { ...(payload.security || {}), cf_clearance: cf };
+  }
+  if (proxy && isLikelyProxyUrl(proxy)) {
+    payload.grok = { ...(payload.grok || {}), base_proxy_url: proxy, asset_proxy_url: proxy };
+    payload.network = { ...(payload.network || {}), base_proxy_url: proxy, asset_proxy_url: proxy };
+  }
+
+  if (Object.keys(payload).length === 0) return false;
+
+  const res = await fetch('/api/v1/admin/config', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...buildAuthHeaders(apiKey)
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try {
+      const data = await readJsonResponse(res);
+      detail = (data && (data.detail || data.message)) || detail;
+    } catch (e) {}
+    throw new Error(`Config update failed: ${detail}`);
+  }
+
+  return true;
+}
+
+async function importTokenFromHashIfPresent() {
+  const incoming = readImportDataFromHash();
+  if (!incoming.token && !incoming.cf && !incoming.proxy) return;
+
+  let tokenAdded = false;
+  let configUpdated = false;
+  let shouldClearHash = false;
+
+  try {
+    configUpdated = await applyConfigFromHash(incoming.cf, incoming.proxy);
+    if (configUpdated) shouldClearHash = true;
+  } catch (e) {
+    showToast(`URL config import failed: ${e.message}`, 'error');
+  }
+
+  if (incoming.token) {
+    const token = sanitizeTokenInput(incoming.token);
+    if (!token || !isLikelyToken(token)) {
+      showToast('URL token format invalid', 'error');
+      return;
+    }
+
+    if (flatTokens.some(t => t.token === token)) {
+      if (configUpdated) showToast('URL config applied; token already exists', 'info');
+      else showToast('Token already exists, skipped URL import', 'info');
+      shouldClearHash = true;
+      if (shouldClearHash) clearImportHash();
+      return;
+    }
+
+    const pool = 'ssoBasic';
+    flatTokens.push({
+      token: token,
+      pool: pool,
+      status: 'active',
+      quota: getDefaultQuotaForPool(pool),
+      note: '',
+      tags: [],
+      fail_count: 0,
+      use_count: 0,
+      _selected: false
+    });
+
+    await syncToServer();
+    tokenAdded = true;
+    shouldClearHash = true;
+  }
+
+  if (tokenAdded) {
+    await loadData();
+  }
+
+  if (tokenAdded && configUpdated) showToast('URL import success: token + config', 'success');
+  else if (tokenAdded) showToast('URL token import success', 'success');
+  else if (configUpdated) showToast('URL config import success', 'success');
+
+  if (shouldClearHash) clearImportHash();
+}
+
 async function readJsonResponse(res) {
   const text = await res.text();
   if (!text) return null;
@@ -111,7 +261,8 @@ async function init() {
   if (apiKey === null) return;
   setupEditPoolDefaults();
   setupConfirmDialog();
-  loadData();
+  await loadData();
+  await importTokenFromHashIfPresent();
 }
 
 async function loadData() {
@@ -475,8 +626,9 @@ async function saveEdit() {
     item.note = newNote;
   } else {
     // Creating new
-    token = byId('edit-token-display').value.trim();
+    token = sanitizeTokenInput(byId('edit-token-display').value);
     if (!token) return showToast('Token 不能为空', 'error');
+    if (!isLikelyToken(token)) return showToast('Token format invalid', 'error');
 
     // Check if exists
     if (flatTokens.some(t => t.token === token)) {
@@ -567,10 +719,16 @@ async function submitImport() {
   const text = byId('import-text').value;
   const lines = text.split('\n');
   const defaultQuota = getDefaultQuotaForPool(pool);
+  let added = 0;
+  let skipped = 0;
 
   lines.forEach(line => {
-    const t = line.trim();
-    if (t && !flatTokens.some(ft => ft.token === t)) {
+    const t = sanitizeTokenInput(line);
+    if (!t || !isLikelyToken(t)) {
+      skipped += 1;
+      return;
+    }
+    if (!flatTokens.some(ft => ft.token === t)) {
       flatTokens.push({
         token: t,
         pool: pool,
@@ -582,12 +740,22 @@ async function submitImport() {
         use_count: 0,
         _selected: false
       });
+      added += 1;
+    } else {
+      skipped += 1;
     }
   });
+
+  if (added === 0) {
+    return showToast('No valid token found in pasted content', 'error');
+  }
 
   await syncToServer();
   closeImportModal();
   loadData();
+  if (skipped > 0) {
+    showToast(`Import done: added ${added}, skipped ${skipped}`, 'warning');
+  }
 }
 
 // Export Logic
@@ -1039,14 +1207,50 @@ async function batchEnableNSFW() {
 
   try {
     const tokens = selected.length > 0 ? selected.map(t => t.token) : null;
+    const requestBody = JSON.stringify({ tokens });
     const res = await fetch('/api/v1/admin/tokens/nsfw/enable/async', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         ...buildAuthHeaders(apiKey)
       },
-      body: JSON.stringify({ tokens })
+      body: requestBody
     });
+
+    // 兼容旧版后端：不存在 async 端点时，自动回退到同步端点
+    if (res.status === 404) {
+      const legacyRes = await fetch('/api/v1/admin/tokens/nsfw/enable', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...buildAuthHeaders(apiKey)
+        },
+        body: requestBody
+      });
+
+      const legacyData = await readJsonResponse(legacyRes);
+      if (!legacyRes.ok) {
+        const detail = legacyData && (legacyData.detail || legacyData.message);
+        throw new Error(detail || `HTTP ${legacyRes.status}`);
+      }
+      if (!legacyData || legacyData.status !== 'success') {
+        throw new Error((legacyData && legacyData.detail) || '请求失败');
+      }
+
+      const summary = legacyData.summary || {};
+      const okCount = Number(summary.ok || 0);
+      const failCount = Number(summary.fail || 0);
+      batchProcessed = batchTotal;
+      updateBatchProgress();
+      finishBatchProcess(false, { silent: true });
+
+      let text = `NSFW 开启完成：成功 ${okCount}，失败 ${failCount}`;
+      if (legacyData.warning) text += `\n⚠️ ${legacyData.warning}`;
+      showToast(text, failCount > 0 || legacyData.warning ? 'warning' : 'success');
+      if (btn) btn.disabled = false;
+      setActionButtonsState();
+      return;
+    }
 
     const data = await readJsonResponse(res);
     if (!res.ok) {
