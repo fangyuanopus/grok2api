@@ -774,11 +774,20 @@ class StorageFactory:
                 return f"mariadb+aiomysql://{url[len('mariadb://') :]}"
         if storage_type == "pgsql":
             if url.startswith("postgres://"):
-                return f"postgresql+asyncpg://{url[len('postgres://') :]}"
-            if url.startswith("postgresql://"):
-                return f"postgresql+asyncpg://{url[len('postgresql://') :]}"
-            if url.startswith("pgsql://"):
-                return f"postgresql+asyncpg://{url[len('pgsql://') :]}"
+                url = f"postgresql+asyncpg://{url[len('postgres://') :]}"
+            elif url.startswith("postgresql://"):
+                url = f"postgresql+asyncpg://{url[len('postgresql://') :]}"
+            elif url.startswith("pgsql://"):
+                url = f"postgresql+asyncpg://{url[len('pgsql://') :]}"
+            # 移除不支持的 SSL 参数 (asyncpg 不支持 sslmode/channel_binding 作为连接参数)
+            from urllib.parse import urlparse, parse_qs, urlencode
+            parsed = urlparse(url)
+            query_params = parse_qs(parsed.query, keep_blank_values=True)
+            # 过滤掉 sslmode 和 channel_binding 参数
+            filtered_params = {k: v for k, v in query_params.items()
+                             if k not in ('sslmode', 'channel_binding')}
+            new_query = urlencode(filtered_params, doseq=True)
+            url = parsed._replace(query=new_query).geturl()
         return url
 
     @classmethod
