@@ -2,6 +2,8 @@
 
 import asyncio
 import time
+import re
+import json
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -28,6 +30,41 @@ DEFAULT_SAVE_DELAY_MS = 500
 
 SUPER_POOL_NAME = "ssoSuper"
 BASIC_POOL_NAME = "ssoBasic"
+
+
+def _normalize_token_value(raw_token: str) -> str:
+    """Normalize token value from legacy or malformed formats."""
+    token = (raw_token or "").strip()
+
+    if token.startswith("sso="):
+        token = token[4:].strip()
+
+    if token.startswith("{") and "token" in token:
+        try:
+            parsed = json.loads(token)
+            if isinstance(parsed, dict) and isinstance(parsed.get("token"), str):
+                token = parsed["token"].strip()
+        except Exception:
+            pass
+
+    patterns = [
+        r'"token"\s*:\s*"([^"]+)"',
+        r"'token'\s*:\s*'([^']+)'",
+        r"\btoken\s*[:=]\s*\"?([A-Za-z0-9\-\._~+/=]+)\"?",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, token)
+        if match:
+            token = match.group(1).strip()
+            break
+
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in ('"', "'"):
+        token = token[1:-1].strip()
+
+    if token.startswith("sso="):
+        token = token[4:].strip()
+
+    return token
 
 
 def _default_quota_for_pool(pool_name: str) -> int:
@@ -84,20 +121,27 @@ class TokenManager:
                         data = {}
 
                 self.pools = {}
+                normalized_any_token = False
                 for pool_name, tokens in data.items():
                     pool = TokenPool(pool_name)
-                    for token_data in tokens:
+                    for idx, token_data in enumerate(tokens):
+                        if isinstance(token_data, str):
+                            token_data = {"token": token_data}
+                            tokens[idx] = token_data
+                            normalized_any_token = True
+
                         quota_missing = not (
                             isinstance(token_data, dict) and "quota" in token_data
                         )
                         try:
                             # 统一存储裸 token
                             if isinstance(token_data, dict):
-                                raw_token = token_data.get("token")
-                                if isinstance(raw_token, str) and raw_token.startswith(
-                                    "sso="
-                                ):
-                                    token_data["token"] = raw_token[4:]
+                                raw_token = token_data.get("token", "")
+                                if isinstance(raw_token, str):
+                                    normalized_token = _normalize_token_value(raw_token)
+                                    if normalized_token != raw_token:
+                                        token_data["token"] = normalized_token
+                                        normalized_any_token = True
                             token_info = TokenInfo(**token_data)
                             if quota_missing and pool_name == SUPER_POOL_NAME:
                                 token_info.quota = SUPER_DEFAULT_QUOTA
@@ -109,6 +153,13 @@ class TokenManager:
                             continue
                     pool._rebuild_index()
                     self.pools[pool_name] = pool
+
+                if normalized_any_token:
+                    async with storage.acquire_lock("tokens_save", timeout=10):
+                        await storage.save_tokens(data)
+                    logger.info(
+                        "Normalized malformed token values and persisted token storage."
+                    )
 
                 self.initialized = True
                 self._last_reload_at = time.monotonic()
