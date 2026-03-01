@@ -854,7 +854,7 @@ async def refresh_tokens_api(data: dict):
             raise HTTPException(status_code=400, detail="No tokens provided")
 
         # 去重并截断
-        max_tokens = int(get_config("performance.usage_max_tokens"))
+        max_tokens = int(get_config("performance.usage_max_tokens", 50))
         unique_tokens, truncated, original_count = _truncate_tokens(
             tokens, max_tokens, "Usage refresh"
         )
@@ -904,7 +904,7 @@ async def refresh_tokens_api_async(data: dict):
         raise HTTPException(status_code=400, detail="No tokens provided")
 
     # 去重并截断
-    max_tokens = int(get_config("performance.usage_max_tokens"))
+    max_tokens = int(get_config("performance.usage_max_tokens", 50))
     unique_tokens, truncated, original_count = _truncate_tokens(
         tokens, max_tokens, "Usage refresh"
     )
